@@ -7,21 +7,20 @@ import (
 	"net/http"
 	"os"
 	"strings"
-	"hash"
-	"hash/crc32"
-	"encoding/hex"
+	"strconv"
 
 	"golang.org/x/sys/unix"
 )
 
-func tarPack(twx *tar.Writer, nx *fsnode, dirpfxx string) {
+func tarPack(twx *tar.Writer, nx *fsnode, dirpfxx string, dummy bool) {
 	// place these in the outer scope so that they can be reused by recursive calls
 	var prevnodes []*fsnode
 	var hdr tar.Header
+	devzero := new(DevZero)
 
-	var packDirContents func(tw *tar.Writer, n *fsnode, dirpfx string)
+	var packDirContents func(tw *tar.Writer, n *fsnode, dirpfx string, dummy bool)
 
-	packDirContents = func(tw *tar.Writer, n *fsnode, dirpfx string) {
+	packDirContents = func(tw *tar.Writer, n *fsnode, dirpfx string, dummy bool) {
 		if n.fh < 0 {
 			panic("not directory")
 		}
@@ -59,7 +58,7 @@ func tarPack(twx *tar.Writer, nx *fsnode, dirpfxx string) {
 					}
 				}
 
-				packDirContents(tw, nn, fullname)
+				packDirContents(tw, nn, fullname, dummy)
 
 			loopdetected:
 				continue
@@ -67,149 +66,75 @@ func tarPack(twx *tar.Writer, nx *fsnode, dirpfxx string) {
 
 			hdr = tar.Header{Name: fullname, Mode: 0644}
 
-			const oflags = int(unix.O_RDONLY)
-			oh, errno := unix.Openat(int(fh), name, oflags, 0)
-			if oh < 0 || errno != nil {
-				// failed to open - skip
-				fmt.Fprintf(
-					os.Stderr,
-					"got error on openat %q: %v\n",
-					name, os.NewSyscallError("openat", errno))
-				continue
-			}
-
-			st := &unix.Stat_t{}
-			errno = unix.Fstat(oh, st)
-			if errno != nil {
-				unix.Close(oh)
-				fmt.Fprintf(
-					os.Stderr,
-					"failed to stat %q: %v\n",
-					name, os.NewSyscallError("fstatat", errno))
-				continue
-			}
-			hdr.ModTime = extractTime(st)
-			hdr.Size = st.Size
-
-			err := tw.WriteHeader(&hdr)
-			if err != nil {
-				unix.Close(oh)
-				panic("WriteHeader err: " + err.Error())
-			}
-
-			f := os.NewFile(uintptr(oh), "")
-			_, err = io.CopyN(tw, f, st.Size)
-			if err != nil {
-				f.Close()
-				panic("file copying failed: " + err.Error())
-			}
-			_ = f.Close()
-		}
-
-		prevnodes = prevnodes[:len(prevnodes)-1] // un-append
-	}
-
-	packDirContents(twx, nx, dirpfxx)
-}
-
-func tarDummyPack(twx *tar.Writer, nx *fsnode, dirpfxx string) {
-	// place these in the outer scope so that they can be reused by recursive calls
-	var prevnodes []*fsnode
-	var hdr tar.Header
-	devzero, err := os.Open("/dev/zero")
-	if err != nil {
-		panic(err)
-	}
-
-	var packDirContents func(tw *tar.Writer, n *fsnode, dirpfx string)
-
-	packDirContents = func(tw *tar.Writer, n *fsnode, dirpfx string) {
-		if n.fh < 0 {
-			panic("not directory")
-		}
-
-		prevnodes = append(prevnodes, n)
-
-		n.lock.RLock()
-		// copy 1 lvl of contents
-		chlist := make([]fsnamed, len(n.chlist))
-		copy(chlist, n.chlist)
-		updt := n.upd
-		n.lock.RUnlock()
-
-		if dirpfx != "" {
-			hdr = tar.Header{
-				Name:    dirpfx,
-				Mode:    0755,
-				ModTime: updt,
-			}
-			tw.WriteHeader(&hdr)
-		}
-
-		for i := range chlist {
-			nn := chlist[i].node
-			name := chlist[i].name
-			fullname := dirpfx + name
-
-			// directory
-			if nn.fh >= 0 {
-				// check for loop
-				for _, pn := range prevnodes {
-					if pn == nn {
-						goto loopdetected
-					}
+			if dummy {
+				hdr.ModTime = nn.upd
+				hdr.Size = nn.size
+				if hdr.Size == -1 {
+					hdr.Size = 0
 				}
 
-				packDirContents(tw, nn, fullname)
+				err := tw.WriteHeader(&hdr)
+				if err != nil {
+					panic("WriteHeader err: " + err.Error())
+				}
 
-			loopdetected:
-				continue
+				_, err = io.CopyN(tw, devzero, hdr.Size)
+				if err != nil {
+					panic("zeroing out failed: " + err.Error())
+				}
+			} else {
+				const oflags = int(unix.O_RDONLY)
+				oh, errno := unix.Openat(int(fh), name, oflags, 0)
+				if oh < 0 || errno != nil {
+					// failed to open - skip
+					fmt.Fprintf(
+						os.Stderr,
+						"got error on openat %q: %v\n",
+						name, os.NewSyscallError("openat", errno))
+					continue
+				}
+
+				st := &unix.Stat_t{}
+				errno = unix.Fstat(oh, st)
+				if errno != nil {
+					unix.Close(oh)
+					fmt.Fprintf(
+						os.Stderr,
+						"failed to stat %q: %v\n",
+						name, os.NewSyscallError("fstatat", errno))
+					continue
+				}
+				hdr.ModTime = extractTime(st)
+				hdr.Size = st.Size
+
+				err := tw.WriteHeader(&hdr)
+				if err != nil {
+					unix.Close(oh)
+					panic("WriteHeader err: " + err.Error())
+				}
+
+				f := os.NewFile(uintptr(oh), "")
+				_, err = io.CopyN(tw, f, st.Size)
+				if err != nil {
+					f.Close()
+					panic("file copying failed: " + err.Error())
+				}
+				_ = f.Close()
 			}
-
-			hdr = tar.Header{Name: fullname, Mode: 0644, ModTime: nn.upd, Size: nn.size}
-			if hdr.Size == -1 {
-				hdr.Size = 0
-			}
-
-			err := tw.WriteHeader(&hdr)
-			if err != nil {
-				panic("WriteHeader err: " + err.Error())
-			}
-
-			_, err = io.CopyN(tw, devzero, hdr.Size)
-			if err != nil {
-				panic("/dev/zero copying failed: " + err.Error())
-			}
-
 		}
 
 		prevnodes = prevnodes[:len(prevnodes)-1] // un-append
 	}
 
-	packDirContents(twx, nx, dirpfxx)
+	packDirContents(twx, nx, dirpfxx, dummy)
 }
 
-type sizedHash struct {
-	Hash hash.Hash
-	Len uint64
-}
-
-func (d *sizedHash) Write(b []byte) (int, error) {
-	count, err := d.Hash.Write(b)
-	if (err != nil) {
-		return 0, err
-	}
-	d.Len += uint64(count)
-	return count, nil
-}
-
-func tarHash(node *fsnode, next string) ([]byte, uint64) {
-	h := crc32.NewIEEE()
-	sized := new(sizedHash)
-	sized.Hash = h
-	tw := tar.NewWriter(sized)
-	tarDummyPack(tw, node, next)
-	return h.Sum(nil), sized.Len
+func tarLength(node *fsnode, next string) uint64 {
+	c := new(WriteCounter)
+	tw := tar.NewWriter(c)
+	tarPack(tw, node, next, true)
+	tw.Close()
+	return c.Len
 }
 
 func tarHandler(
@@ -235,6 +160,8 @@ func tarHandler(
 		return false
 	}
 
+	w.Header().Set("Content-Length", strconv.FormatUint(node.tarlength, 10))
+
 	tw := tar.NewWriter(w)
 
 	next = next[1:] // skip leading '/'
@@ -242,10 +169,7 @@ func tarHandler(
 		next += "/" // need trailing / to indicate dir
 	}
 
-	hash, size := tarHash(node, next)
-	fmt.Fprintf(os.Stderr, "tar dbg: %s %d %s\n", prev, size, hex.EncodeToString(hash))
-
-	tarPack(tw, node, next)
+	tarPack(tw, node, next, false)
 
 	tw.Close()
 

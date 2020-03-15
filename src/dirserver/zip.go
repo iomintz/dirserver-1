@@ -7,17 +7,19 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"strconv"
 
 	"golang.org/x/sys/unix"
 )
 
-func zipCompress(twx *zip.Writer, nx *fsnode, dirpfxx string) {
+func zipCompress(twx *zip.Writer, nx *fsnode, dirpfxx string, dummy bool) {
 
 	var prevnodes []*fsnode
+	devzero := new(DevZero)
 
-	var packDirContents func(tw *zip.Writer, n *fsnode, dirpfx string)
+	var packDirContents func(tw *zip.Writer, n *fsnode, dirpfx string, dummy bool)
 
-	packDirContents = func(tw *zip.Writer, n *fsnode, dirpfx string) {
+	packDirContents = func(tw *zip.Writer, n *fsnode, dirpfx string, dummy bool) {
 		if n.fh < 0 {
 			panic("not directory")
 		}
@@ -54,7 +56,7 @@ func zipCompress(twx *zip.Writer, nx *fsnode, dirpfxx string) {
 					}
 				}
 
-				packDirContents(tw, nn, fullname)
+				packDirContents(tw, nn, fullname, dummy)
 
 			loopdetected:
 				continue
@@ -62,48 +64,70 @@ func zipCompress(twx *zip.Writer, nx *fsnode, dirpfxx string) {
 
 			hdr := &zip.FileHeader{Name: fullname}
 
-			const oflags = int(unix.O_RDONLY)
-			oh, errno := unix.Openat(int(fh), name, oflags, 0)
-			if oh < 0 || errno != nil {
-				// failed to open - skip
-				fmt.Fprintf(
-					os.Stderr,
-					"got error on openat %q: %v\n",
-					name, os.NewSyscallError("openat", errno))
-				continue
-			}
+			if dummy {
+				hdr.Modified = nn.upd
 
-			st := &unix.Stat_t{}
-			errno = unix.Fstat(oh, st)
-			if errno != nil {
-				unix.Close(oh)
-				fmt.Fprintf(
-					os.Stderr,
-					"failed to stat %q: %v\n",
-					name, os.NewSyscallError("fstatat", errno))
-				continue
-			}
-			hdr.Modified = extractTime(st)
+				pw, err := tw.CreateHeader(hdr)
+				if err != nil {
+					panic("CreateHeader err: " + err.Error())
+				}
 
-			pw, err := tw.CreateHeader(hdr)
-			if err != nil {
-				unix.Close(oh)
-				panic("CreateHeader err: " + err.Error())
-			}
+				_, err = io.CopyN(pw, devzero, nn.size)
+				if err != nil {
+					panic("zeroing out failed: " + err.Error())
+				}
+			} else {
+				const oflags = int(unix.O_RDONLY)
+				oh, errno := unix.Openat(int(fh), name, oflags, 0)
+				if oh < 0 || errno != nil {
+					// failed to open - skip
+					fmt.Fprintf(
+						os.Stderr,
+						"got error on openat %q: %v\n",
+						name, os.NewSyscallError("openat", errno))
+					continue
+				}
 
-			f := os.NewFile(uintptr(oh), "")
-			_, err = io.Copy(pw, f)
-			if err != nil {
-				f.Close()
-				panic("file copying failed: " + err.Error())
+				st := &unix.Stat_t{}
+				errno = unix.Fstat(oh, st)
+				if errno != nil {
+					unix.Close(oh)
+					fmt.Fprintf(
+						os.Stderr,
+						"failed to stat %q: %v\n",
+						name, os.NewSyscallError("fstatat", errno))
+					continue
+				}
+				hdr.Modified = extractTime(st)
+
+				pw, err := tw.CreateHeader(hdr)
+				if err != nil {
+					unix.Close(oh)
+					panic("CreateHeader err: " + err.Error())
+				}
+
+				f := os.NewFile(uintptr(oh), "")
+				_, err = io.Copy(pw, f)
+				if err != nil {
+					f.Close()
+					panic("file copying failed: " + err.Error())
+				}
+				_ = f.Close()
 			}
-			_ = f.Close()
 		}
 
 		prevnodes = prevnodes[:len(prevnodes)-1] // un-append
 	}
 
-	packDirContents(twx, nx, dirpfxx)
+	packDirContents(twx, nx, dirpfxx, dummy)
+}
+
+func zipLength(node *fsnode, next string) uint64 {
+	c := new(WriteCounter)
+	tw := zip.NewWriter(c)
+	zipCompress(tw, node, next, true)
+	tw.Close()
+	return c.Len
 }
 
 func zipHandler(
@@ -129,13 +153,15 @@ func zipHandler(
 		return false
 	}
 
+	w.Header().Set("Content-Length", strconv.FormatUint(node.ziplength, 10))
+
 	tw := zip.NewWriter(w)
 
 	next = next[1:] // skip leading '/'
 	if next != "" {
 		next += "/" // need trailing / to indicate dir
 	}
-	zipCompress(tw, node, next)
+	zipCompress(tw, node, next, false)
 
 	tw.Close()
 

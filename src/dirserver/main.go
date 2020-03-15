@@ -17,7 +17,6 @@ import (
 	"sync"
 	"text/template"
 	"time"
-	"crypto/sha1"
 
 	ft "github.com/valyala/fasttemplate"
 	"golang.org/x/sys/unix"
@@ -34,7 +33,8 @@ type fsnode struct {
 	size   int64
 	fh     int32  // file handle
 	wd     int32  // watch descriptor, for inotify
-	etag   [sha1.Size]byte  // sha-1 hash of the tar of this directory
+	tarlength uint64  // size of the tar of this directory
+	ziplength uint64  // ditto for zip
 }
 
 type fsnamed struct {
@@ -933,6 +933,10 @@ func scanDir(n *fsnode) {
 				node:  nn,
 			})
 			n.chmap[fn] = nn
+			len := tarLength(nn, fn)
+			nn.tarlength = len
+			len = zipLength(nn, fn)
+			nn.ziplength = len
 		} else {
 			fmt.Fprintf(os.Stderr, "%q is unknown 0x%04X\n", fn, ft)
 			unix.Close(fh)
