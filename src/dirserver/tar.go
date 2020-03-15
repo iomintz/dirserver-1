@@ -7,9 +7,9 @@ import (
 	"net/http"
 	"os"
 	"strings"
-	"crypto/sha1"
-	"encoding/hex"
 	"hash"
+	"hash/crc32"
+	"encoding/hex"
 
 	"golang.org/x/sys/unix"
 )
@@ -204,7 +204,7 @@ func (d *sizedHash) Write(b []byte) (int, error) {
 }
 
 func tarHash(node *fsnode, next string) ([]byte, uint64) {
-	h := sha1.New()
+	h := crc32.NewIEEE()
 	sized := new(sizedHash)
 	sized.Hash = h
 	tw := tar.NewWriter(sized)
