@@ -38,6 +38,7 @@ func tarPack(twx *tar.Writer, nx *fsnode, dirpfxx string) {
 				Name:    dirpfx,
 				Mode:    0755,
 				ModTime: updt,
+				Format: tar.FormatPAX,
 			}
 			tw.WriteHeader(&hdr)
 		}
@@ -62,7 +63,7 @@ func tarPack(twx *tar.Writer, nx *fsnode, dirpfxx string) {
 				continue
 			}
 
-			hdr = tar.Header{Name: fullname, Mode: 0644}
+			hdr = tar.Header{Name: fullname, Mode: 0644, Format: tar.FormatPAX}
 
 			const oflags = int(unix.O_RDONLY)
 			oh, errno := unix.Openat(int(fh), name, oflags, 0)
