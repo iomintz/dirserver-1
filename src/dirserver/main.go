@@ -17,6 +17,7 @@ import (
 	"sync"
 	"text/template"
 	"time"
+	"crypto/sha1"
 
 	ft "github.com/valyala/fasttemplate"
 	"golang.org/x/sys/unix"
@@ -26,13 +27,14 @@ import (
 
 type fsnode struct {
 	lock   sync.RWMutex
-	chmap  map[string]*fsnode
-	chlist []fsnamed
-	papas  []*fsnode
+	chmap  map[string]*fsnode  // children
+	chlist []fsnamed  // children
+	papas  []*fsnode  // parents?
 	upd    time.Time
 	size   int64
-	fh     int32
-	wd     int32
+	fh     int32  // file handle
+	wd     int32  // watch descriptor, for inotify
+	etag   [sha1.Size]byte  // sha-1 hash of the tar of this directory
 }
 
 type fsnamed struct {
@@ -85,6 +87,10 @@ var specialEntries = map[string]specialFunc{
 func processSpecial(
 	w http.ResponseWriter,
 	entry string, node *fsnode, prev, next string) bool {
+
+	// entry = "._" + one of the keys in specialEntries
+	// node = requested path node
+	// if /foo/bar/._tar/baz is requested, prev = /foo/bar, next = baz
 
 	const pfx = "._"
 
